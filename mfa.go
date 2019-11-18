@@ -2,99 +2,113 @@ package main
 
 import (
 	"bufio"
-	"flag"
 	"fmt"
+	"log"
+	"os"
+	"time"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/iam"
 	"github.com/aws/aws-sdk-go/service/sts"
 	"github.com/go-ini/ini"
-	"log"
-	"os"
-	"os/user"
 )
 
-func fatalErr(err error) {
+var (
+	credsFile = os.Getenv("HOME") + "/.aws/credentials"
+	cfgFile   = os.Getenv("HOME") + "/.aws/config"
+)
+
+func fatalErr(err error, msg string) {
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal(msg+":", err)
 	}
 }
 
 func main() {
-
-	srcF := flag.String("s", "default", "Source (primary) profile")
-	dstF := flag.String("d", "", "MFA-enabled profile")
-
-	flag.Parse()
-
-	if *srcF == "" || *dstF == "" {
-		flag.Usage()
+	if len(os.Args) < 2 {
+		fmt.Println("Usage: go-aws-mfa [profile]")
 		os.Exit(1)
 	}
 
-	conf := &aws.Config{
-		Credentials: credentials.NewSharedCredentials("", *srcF),
+	profile := os.Args[1]
+	fmt.Printf("Authenticating for %s\n", profile)
+
+	credsini, err := ini.Load(credsFile)
+	fatalErr(err, "Failed to load credentials file")
+
+	srcProfile := credsini.Section(profile).Key("long_term").MustString("")
+	assumeRole := credsini.Section(profile).Key("assume_role").MustString("")
+	if srcProfile == "" {
+		srcProfile = profile
 	}
 
-	sess, err := session.NewSession(conf)
+	ltProfile := srcProfile + "-long-term"
+	cred := credsini.Section(ltProfile)
+	mfasn := cred.Key("aws_mfa_device").MustString("")
+	id := cred.Key("aws_access_key_id").MustString("")
+	key := cred.Key("aws_secret_access_key").MustString("")
 
-	fatalErr(err)
-
-	_iam := iam.New(sess)
-
-	devices, err := _iam.ListMFADevices(&iam.ListMFADevicesInput{})
-
-	fatalErr(err)
-
-	if len(devices.MFADevices) == 0 {
-		log.Fatal("No MFA devices configured")
+	fmt.Println("Sourcing creds from", ltProfile)
+	if id == "" || key == "" {
+		fmt.Println("ERROR: couldn't find key id or access key")
+		os.Exit(1)
 	}
 
-	sn := devices.MFADevices[0].SerialNumber
+	if assumeRole != "" {
+		fmt.Println("Assuming role", assumeRole)
+	}
 
-	fmt.Printf("Using device %1s\n", *sn)
+	fmt.Println("Using the MFA device", mfasn)
 
-	_sts := sts.New(sess)
+	sess, err := session.NewSession(&aws.Config{Credentials: credentials.NewSharedCredentials("", ltProfile)})
+	fatalErr(err, "ERROR: failed to create session")
 
 	fmt.Printf("Enter MFA code: ")
-
 	r := bufio.NewReader(os.Stdin)
 	code, _, err := r.ReadLine()
+	fatalErr(err, "ERROR: failed to read MFA code")
+	mfaCode := string(code)
 
-	fatalErr(err)
+	if len(code) != 6 {
+		fmt.Println("ERROR: code must be 6 digits")
+		os.Exit(1)
+	}
 
-	codeStr := string(code)
+	stSec, err := credsini.NewSection(profile)
+	fatalErr(err, "ERROR: failed to create a new section for "+profile)
 
-	res, err := _sts.GetSessionToken(&sts.GetSessionTokenInput{
-		TokenCode:    &codeStr,
-		SerialNumber: sn,
-	})
+	validUntil := time.Now()
+	_sts := sts.New(sess)
+	if assumeRole == "" {
+		res, err := _sts.GetSessionToken(&sts.GetSessionTokenInput{
+			TokenCode:    &mfaCode,
+			SerialNumber: &mfasn,
+		})
+		fatalErr(err, "ERROR: failed to get session token")
 
-	fatalErr(err)
+		stSec.NewKey("aws_access_key_id", *res.Credentials.AccessKeyId)
+		stSec.NewKey("aws_secret_access_key", *res.Credentials.SecretAccessKey)
+		stSec.NewKey("aws_session_token", *res.Credentials.SessionToken)
+		validUntil = *res.Credentials.Expiration
 
-	usr, err := user.Current()
+	} else {
+		res, err := _sts.AssumeRole(&sts.AssumeRoleInput{
+			TokenCode:       &mfaCode,
+			SerialNumber:    &mfasn,
+			RoleArn:         &assumeRole,
+			RoleSessionName: &profile,
+		})
+		fatalErr(err, "ERROR: failed to assume role")
 
-	fatalErr(err)
+		stSec.NewKey("aws_access_key_id", *res.Credentials.AccessKeyId)
+		stSec.NewKey("aws_secret_access_key", *res.Credentials.SecretAccessKey)
+		stSec.NewKey("aws_session_token", *res.Credentials.SessionToken)
+		validUntil = *res.Credentials.Expiration
+	}
 
-	filePath := usr.HomeDir + "/.aws/credentials"
+	err = credsini.SaveTo(credsFile)
+	fatalErr(err, "ERROR: failed to update profile with new credentials")
 
-	credFile, err := ini.Load(filePath)
-
-	fatalErr(err)
-
-	sect, err := credFile.NewSection(*dstF)
-
-	fatalErr(err)
-
-	sect.NewKey("aws_access_key_id", *res.Credentials.AccessKeyId)
-	sect.NewKey("aws_secret_access_key", *res.Credentials.SecretAccessKey)
-	sect.NewKey("aws_session_token", *res.Credentials.SessionToken)
-
-	credFile.SaveTo(filePath)
-
-	fatalErr(err)
-
-	fmt.Printf("Access token updated for %1s\n", *dstF)
-
+	fmt.Printf("Credentials updated for %s, valid until %s\n", profile, validUntil.In(time.Local))
 }
