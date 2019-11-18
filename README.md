@@ -49,6 +49,10 @@ Note that this requires the `~/.aws/config` to not contain `role_arn` or `source
 region = intl-antarctica-01
 ```
 
+Now you can use your short term creds like so:
+
+    aws --profile prod cognito-idp list-user-pools
+
 ## Download
 
 You can obtain the binary from the [releases](https://github.com/penguinpowernz/go-aws-mfa/releases) section.
