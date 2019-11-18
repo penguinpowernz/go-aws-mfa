@@ -1,36 +1,54 @@
-### Why
-If you have an [MFA-enabled](https://aws.amazon.com/iam/details/mfa/) account on Amazon AWS, you need to refresh the token periodically, in order to use [aws cli toolkit](https://aws.amazon.com/cli/). 
+# go-aws-mfa
 
-The sequence of actions is:
+A tool to help with using AWS CLI when MFA is enabled.
 
-* using the primary AWS account, request the [list of MFA devices](http://docs.aws.amazon.com/IAM/latest/APIReference/API_ListMFADevices.html) configured for this account
-* issue an STS request to [get the session token](http://docs.aws.amazon.com/STS/latest/APIReference/API_GetSessionToken.html)
-* update the `~/.aws/credentials` file with the received access key, secret key and session token for the given profile
+## Usage
 
-This simple flow is implemented as Go utility, that only updates the existing profile in the `~/.aws/credentials` with the access/secret/session tokens.
-
-There is another utility [awsmfa](https://github.com/dcoker/awsmfa/) with extended functionality for AWS key management / rotation.
-
-### How
+Assuming the AWS best practices are used, with a privilege-less master account that is logged into, and then a role is assumed for accessing each account specific environment, you would setup your config like this:
 
 ```
-Usage of ./go-aws-mfa:
-  -d string
-        MFA-enabled profile
-  -s string
-        Source (primary) profile
+[default-long-term]
+aws_secret_access_key = YOUR_MASTER_KEY
+aws_access_key_id     = YOUR_MASTER_ID
+aws_mfa_device        = YOUR_MASTER_MFA_DEVICE_ARN
+
+[prod]
+long_term             = default
+assume_role           = arn:aws:iam::1234567890:role/AssumedRole
+
+[dev]
+long_term             = default
+assume_role           = arn:aws:iam::9999999999:role/AssumedRole
 ```
 
-where
+By setting up your `~/.aws/credentials` file with this pattern you can quickly and easily assume roles and authenticate using an MFA code.
 
-* `-s` specifies the IAM role that has an [MFA device configured](http://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_mfa_enable_virtual.html)
-* `-d` specifies the target profile to add/replace the credentials to.
+    $ go-aws-mfa prod
+    Authenticating for prod
+    Sourcing creds from default-long-term
+    Assuming role arn:aws:iam::1234567890:role/AssumedRole
+    Using the MFA device arn:aws:iam::0987654321:mfa/username
+    Enter MFA code: 748871
+    Credentials updated for prod, valid until 2019-11-18 19:45:57 +0000 UTC
 
-#### Example
-
-`./go-aws-mfa -s user1 -d user1-mfa` will ask for the token code for MFA device configured for `user1`. Then the temporary credentials will be stored for `user1-mfa`.
-In order to use that temporary account with `awscli`, you need to set the `AWS_PROFILE` environment variable to `user1-mfa` and then invoke `aws` command normally, for example:
+After this, the `[prod]` section of your config file would look like this:
 
 ```
-AWS_PROFILE=user1-mfa aws s3 ls s3://bucket-user1/
+[prod]
+long_term             = default
+assume_role           = arn:aws:iam::1234567890:role/AssumedRole
+aws_access_key_id     = SHORT_TERM_ID
+aws_secret_access_key = SHORT_TERM_KEY
+aws_session_token     = SHORT_TERM_TOKEN
 ```
+
+Note that this requires the `~/.aws/config` to not contain `role_arn` or `source_profile` or weird things can happen.  You can still keep region there though:
+
+```
+[profile prod]
+region = intl-antarctica-01
+```
+
+## Download
+
+You can obtain the binary from the [releases](https://github.com/penguinpowernz/go-aws-mfa/releases) section.
